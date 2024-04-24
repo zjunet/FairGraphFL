@@ -1,8 +1,47 @@
 # Towards Fair Graph Federated Learning via Incentive Mechanisms
 ### About
-This is the Pytorch implementation of the paper "Towards Fair Graph Federated Learning via Incentive Mechanisms" accepted by AAAI-2024.
-### Abstract
-Graph federated learning (FL) has emerged as a pivotal paradigm enabling  multiple agents to collaboratively train a graph model while preserving local data privacy. Yet, current efforts overlook a key issue: agents are self-interested and would hesitant to share data without fair and satisfactory incentives. This paper is the first endeavor to address this issue by studying the incentive mechanism for graph federated learning. 
-We identify a unique phenomenon in graph federated learning: the presence of agents posing potential harm to the federation and agents contributing with delays. This stands in contrast to previous FL incentive mechanisms that assume all agents contribute positively and in a timely manner. 
-In view of this, this paper presents a novel incentive mechanism  tailored for fair graph federated learning, integrating incentives derived from both model gradient and payoff. 
-To achieve this, we first introduce an agent valuation function aimed at quantifying agent contributions through the introduction of two criteria: gradient alignment and graph diversity. Moreover, due to the high heterogeneity in graph federated learning, striking a balance between accuracy and fairness becomes particularly crucial. We introduce motif prototypes to enhance accuracy, communicated between the server and agents, enhancing global model aggregation and aiding agents in local model optimization. Extensive experiments show that our model achieves the best trade-off between accuracy and the fairness of model gradient, as well as superior payoff fairness.
+This is the Pytorch implementation of the paper "[Towards Fair Graph Federated Learning via Incentive Mechanisms](http://arxiv.org/abs/2312.13306)" accepted by AAAI-2024.
+### Setup
+```
+pip3 install -r requirements.txt
+```
+### Dataset
+For the graph classiciation datasets, download and unzip it, and put it under data/.
+### Usage: How to run the code
+```
+python main_oneDS.py --repeat {index of the repeat}
+      --data_group {dataset}
+      --num_clients {num of clients}
+      --seed {random seed}
+      --lambda {coefficient of regularization term}
+      --alpha {size of motif vocabulary}
+```
+## Run repetitions for all datasets
+
+To averagely aggregate all repetitions, and get the overall performance:
+
+```
+python aggregateResults.py --inpath {the path to repetitions} --outpath {the path to outputs} --data_partition {the data partition mechanism}
+```
+
+Or, to run one file for all:
+
+```
+bash runnerfile_aggregateResults
+```
+
+
+
+### Acknowledgement
+Some of the implementation is adopted from [Federated Graph Classification over Non-IID Graphs](https://github.com/Oxfordblue7/GCFL).
+
+### Cite
+If you find this work helpful, please cite
+```
+@inproceedings{Pan2023TowardsFG,
+  title={Towards Fair Graph Federated Learning via Incentive Mechanisms},
+  author={Chenglu Pan and Jiarong Xu and Yue Yu and Ziqi Yang and Qingbiao Wu and Chunping Wang and Lei Chen and Yang Yang},
+  year={2024},
+  booktitle={AAAI}
+}
+```

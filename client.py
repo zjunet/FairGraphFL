@@ -8,22 +8,29 @@ from torch_geometric.data import DataLoader
 from torch_geometric.data import Dataset
 from torch import nn
 import torch.nn.functional as F
+import numpy as np
+from opacus import PrivacyEngine
+from torch.linalg import norm
+from sklearn.cluster import KMeans
+import subprocess
 class Motif_graph():
-    def __init__(self, graph, motif_dict):
+    def __init__(self, graph, motif_dict, motif=None):
         self.graph = graph
         
         self.motif_dict = motif_dict
-
+        self.motif = motif 
 class MotifDataset(Dataset):
     def __init__(self, dataset):
         self.graph = dataset
+        self.indices = torch.arange(len(dataset))
     def __len__(self):
         return len(self.graph)
     def __getitem__(self, index):
         graph = self.graph[index].graph
         #label = self.graph[index].graph.y
         motif_dict = self.graph[index].motif_dict
-        return graph,  motif_dict
+        motif = self.graph[index].motif
+        return graph,  motif_dict, self.indices[index]
     
 
 class Client_GC():
@@ -66,37 +73,67 @@ class Client_GC():
         self.motifset_dict = []
 
 
-        self.code_prototype = {} 
+        self.code_prototype = {} #motif_code: prototype
 
         self.simi = {}
         self.rs = {} 
-        
-      
-        
+        self.reput = 0
+        self.payoff = 0
+        self.reputation = []
 
-
+        self.num_graphs = len(self.graphs_train)
         
-
+        
+        
+        
+        
     def motif_construction(self):
+        
         self.motif_dataset = []
-   
+        
+        
 
+        n = 0
         for graph in self.graphs_train:
             motif_freq = {} 
-            label = graph.x
-            _, label = torch.max(label, dim=1)
-            label = label.tolist()
 
+            motif_idx = {}
+
+            label = graph.x
+           
+            _, label = torch.max(label, dim=1)
+            
+          
+
+            n += graph.num_nodes
+
+
+
+
+
+            
+           
+            
+            
             if graph.edge_attr is not None:
                 graph_net = to_networkx(graph, to_undirected=True, edge_attrs=["edge_attr"])
             else:
                 graph_net = to_networkx(graph, to_undirected=True)
             mcb = nx.cycle_basis(graph_net)
+            
+                    
+
             mcb_tuple = [tuple(ele) for ele in mcb]
+            for ele in mcb_tuple:
+                if len(ele) > 4:
+                    mcb_tuple.remove(ele)
+            
+            
             
 
             edges = []
             for e in graph_net.edges():
+                
                 count = 0
                 for c in mcb_tuple:
                     if e[0] in set(c) and e[1] in set(c):
@@ -105,21 +142,18 @@ class Client_GC():
                 if count == 0:
                     edges.append(e)
             edges = list(set(edges))
+           
 
 
             for e in edges:
-
-                if 'edge_attr' in graph_net.get_edge_data(e[0], e[1]):
-                    weight = graph_net.get_edge_data(e[0], e[1])['edge_attr']
-                    weight = weight.index(max(weight))
-                else:
-                    weight = 1
+                
+                weight = 1
                 
                 edge = ((label[e[0]], label[e[1]]), weight)
                 c = deepcopy(edge[0])
                 weight = deepcopy(edge[1])
                 for i in range(2):
-
+                    
                     if (c, weight) in self.motif_vocab:
                         self.motif_vocab[(c, weight)] += 1
                     else:
@@ -135,10 +169,22 @@ class Client_GC():
                 if (c, weight) not in motif_freq:
                     motif_freq[(c, weight)] = 1
 
+                for i in range(2):
+                    if (c, weight) in motif_idx:
+                        motif_idx[(c, weight)].append((e[0], e[1]))
+                    else:
+                        c = (label[e[1]], label[e[0]])
+                if (c, weight) not in motif_idx:
+                    motif_idx[(c, weight)] = [(e[0], e[1])]
+                
+                
+
 
 
 
             for m in mcb_tuple:
+
+                
                 weight = tuple(self.find_ring_weights(m, graph_net))
                 #print(weight)
                 ring = []
@@ -156,6 +202,17 @@ class Client_GC():
                         weight = self.shift_right(weight)
                 if (c, weight) not in self.motif_vocab:
                     self.motif_vocab[(c, weight)] = 1
+                
+                for i in range(len(m)):
+                    if (c, weight) in motif_idx:
+                        motif_idx[(c, weight)].append(m)
+                    else:
+                        c = self.shift_right(c)
+                        weight = self.shift_right(weight)
+                if (c, weight) not in motif_idx:
+                    motif_idx[(c, weight)] = [m] 
+
+
 
                 for i in range(len(c)):
                     if (c, weight) in motif_freq:
@@ -165,25 +222,27 @@ class Client_GC():
                         weight = self.shift_right(weight)
                 if (c, weight) not in motif_freq:
                     motif_freq[(c, weight)] = 1
+                
             for motif in motif_freq.keys():
                 if motif not in self.motif_count.keys():
                     self.motif_count[motif] = 1
                 else:
                     self.motif_count[motif] += 1
+            
             graphs = Motif_graph
-
-            self.motif_dataset.append(graphs(graph, motif_freq))
+            
+            self.motif_dataset.append(graphs(graph, motif_freq, motif_idx))
         
         for motif_graph in self.motif_dataset:
-
+            #tf_idf = {}
             
             for motif in motif_graph.motif_dict:
-                c = motif_graph.motif_dict[motif] 
+                c = motif_graph.motif_dict[motif]
                 if c > 0:
                     M = len(self.motif_dataset) 
                     N = self.motif_count[motif] 
                     tf = c * (math.log((1 + M) / (1 + N)) + 1)
-
+                    #tf_idf[motif] = tf
                     if motif not in self.tf_idf:
                         self.tf_idf[motif] = []
                         self.tf_idf[motif].append(tf)
@@ -194,7 +253,8 @@ class Client_GC():
         self.avg_tf = sorted(self.avg_tf.items(), key = lambda x: x[1], reverse=True)
         rank_list = []
         a = int(len(self.avg_tf) * self.args.beta)
-
+        # a = int(len(self.avg_tf) * 1)
+        
         
         for i in range(a):
             rank_list.append(self.avg_tf[i])
@@ -210,12 +270,17 @@ class Client_GC():
             for key in list(motif_graph.motif_dict.keys()):
                 if key not in self.avg_tf:
                     motif_graph.motif_dict.pop(key)
-
+            for key in list(motif_graph.motif.keys()):
+                if key not in self.avg_tf:
+                    motif_graph.motif.pop(key)
+        # print(self.motif_count.keys())    
+        
         for key in self.motif_count.keys():
             self.prototype[key] = []
         for motif_graph in self.motif_dataset:
             self.motifset_dict.append(motif_graph.motif_dict)
-       
+        print('finish constructing prototypes!')    
+        
 
         
         
@@ -243,44 +308,78 @@ class Client_GC():
 
         for motif_graph in self.motif_dataset:
             motif_graph.graph.to(self.args.device)
-            _, x1 = self.model(motif_graph.graph)
-
+            self.model.concat = False
+            _, x1, x2 = self.model(motif_graph.graph)
+           
+            
+            
+            
+            
             x1 = x1.data
+          
+            
 
             for key in motif_graph.motif_dict.keys():
- 
-                self.prototype[key].append(x1)
                 
+                self.prototype[key].append(x1)
 
 
+            
         
         
         for key in self.prototype.keys():
             if len(self.prototype[key]) == 1:
                 self.prototype[key] = self.prototype[key][0].squeeze()
             elif len(self.prototype[key]) > 1:
+                
                 c = self.prototype[key][0]
                 for i in range(1, len(self.prototype[key])):
                     
                     
                     c = torch.cat((c, self.prototype[key][i]), dim=0)
                 self.prototype[key] = c
-
+                
+            
                 
                 self.prototype[key] = torch.mean(self.prototype[key], dim=0).data
 
+
+                
+        for key in self.prototype.keys():
         
-        print('done')
+            self.prototype[key] /= max([norm(self.prototype[key]), 1])
+            import math
+
+            
+            eps = 50
+            delta = 0.01
+            c = math.sqrt(2 * math.log(1.25 / delta))
+            theta = arccos(1 / self.num_graphs)
+            theta_ = theta / 2
+            de = 2 * sin(theta_)
+            sigma = c * de / eps
+
+
+
+            
+            noise = torch.normal(mean=0.,std=0.031/10,size=(1,64))[0].to(self.args.device)
+            
+            
+
+            
+                    
+    
         
     def clear_prototype(self):
-
-
-        self.prototype_code = {}
+        
+        self.prototype_code = {} 
         self.motif_code = {} 
         self.prototype_code = {}
+        
     
     def download_code(self, server):
         for key in self.prototype.keys():
+            #print(((0, 0, 0, 0, 0, 0), (0, 0, 0, 0, 0, 0)) in server.global_prototype_code.keys())
             self.prototype_code[key] = server.global_prototype_code[key]
         for key, value in self.prototype_code.items():
             self.code_motif[value] = key
@@ -288,6 +387,7 @@ class Client_GC():
 
 
     def prototype_train(self, server):
+        self.model.concat = True
 
         for key in self.motif_count.keys():
             self.prototype[key] = []
@@ -304,7 +404,7 @@ class Client_GC():
             for item in motif_list:
                 motif_code.append(self.prototype_code[item])
             motif_graph.motif_dict = tuple(motif_code)
-
+            
         for motif_graph in self.motif_dataset:
             if motif_graph.motif_dict in self.motif_code.keys():
                 motif_graph.motif_dict = self.motif_code[motif_graph.motif_dict]
@@ -317,19 +417,22 @@ class Client_GC():
             
 
         dataset = MotifDataset(self.motif_dataset)
-
-        trainloader = DataLoader(dataset, batch_size=128, shuffle = True)
-
+        
+        trainloader = DataLoader(dataset, batch_size=128, shuffle = False)
+        
+        self.backup = deepcopy(self.model)
         self.model.train()
         for batch in trainloader:
+            
             proto = {}
             
             self.optimizer.zero_grad()
-            graph, motifs = batch[0].to(self.args.device), batch[1].to(self.args.device)
-            pred, protos = self.model(graph)
+            graph, motifs, indices = batch[0].to(self.args.device), batch[1].to(self.args.device), batch[2].to(self.args.device)
             
-
+            pred, protos, emb = self.model(graph)
+            
             label = graph.y
+            
             loss1 = self.model.loss(pred, label)
             loss2 = 0.
             loss_mse = nn.MSELoss()
@@ -358,7 +461,148 @@ class Client_GC():
                         
                         c = torch.cat((c, proto[key][i]), dim=0)
                     proto[key] = c
+                
+                    proto[key] = torch.mean(proto[key], dim=0)
 
+
+
+        
+           
+            proto_global = {}
+            
+            for key in proto.keys():
+                proto_global[key] = server.global_prototype[server.code[key]].data
+            
+            for key in proto.keys():
+
+                #print(proto[key], proto_global[key])
+                
+                loss2 += loss_mse(proto[key], proto_global[key]) / len(proto.keys())
+        
+            loss = loss1 + loss2 * self.args.lamb
+            loss.backward()
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+
+            
+        for key in self.prototype.keys():
+            if len(self.prototype[key]) == 1:
+                
+                self.prototype[key] = self.prototype[key][0].squeeze().data
+                
+            elif len(self.prototype[key]) > 1:
+                
+                c = self.prototype[key][0]
+                
+                for i in range(1, len(self.prototype[key])):
+                   
+                    
+                    
+                    c = torch.cat((c, self.prototype[key][i]), dim=0)
+                self.prototype[key] = c
+                
+          
+                
+                self.prototype[key] = torch.mean(self.prototype[key], dim=0).data
+
+
+
+
+
+        print('finish')
+
+
+    def dptrain(self, server):
+
+        for key in self.motif_count.keys():
+            self.prototype[key] = []
+        
+        for i, motif_graph in enumerate(self.motif_dataset):
+            motif_graph.motif_dict = self.motifset_dict[i]
+       
+        
+        
+        for motif_graph in self.motif_dataset:
+            
+            motif_list = list(motif_graph.motif_dict.keys())
+            motif_code = []
+            for item in motif_list:
+                motif_code.append(self.prototype_code[item])
+            motif_graph.motif_dict = tuple(motif_code)
+          
+        for motif_graph in self.motif_dataset:
+            if motif_graph.motif_dict in self.motif_code.keys():
+                motif_graph.motif_dict = self.motif_code[motif_graph.motif_dict]
+            else:
+                self.motif_code[motif_graph.motif_dict] = len(self.motif_code.keys())
+                motif_graph.motif_dict = self.motif_code[motif_graph.motif_dict]
+
+
+
+            
+
+            
+
+     
+        dataset = MotifDataset(self.motif_dataset)
+        
+        trainloader = DataLoader(dataset, batch_size=128, shuffle = True)
+        self.backup = deepcopy(self.model)
+
+
+
+
+        privacy_engine = PrivacyEngine()
+        model, optimizer, trainloader = \
+            privacy_engine.make_private(
+                module=self.model,
+                optimizer=self.optimizer,
+                data_loader=trainloader,
+                noise_multiplier=1.0,
+                max_grad_norm=1.0,
+            )
+        
+
+        model.train()
+        for batch in trainloader:
+            proto = {}
+            
+            optimizer.zero_grad()
+            graph, motifs = batch[0].to(self.args.device), batch[1].to(self.args.device)
+            pred, protos = model(graph)
+            
+
+         
+            label = graph.y
+            loss1 = F.nll_loss(pred, label)
+            loss2 = 0.
+            loss_mse = nn.MSELoss()
+            for i, motif in enumerate(motifs):
+                motif_idx = motif.item()
+                motif_tuple = list(self.motif_code.keys())[motif_idx]
+                for idx in motif_tuple:
+                    if idx not in proto.keys():
+                        proto[idx] = []
+                        proto[idx].append(protos[i])
+                        self.prototype[self.code_motif[idx]].append(protos[i].unsqueeze(dim=0))
+                    else:
+                        proto[idx].append(protos[i])
+                        self.prototype[self.code_motif[idx]].append(protos[i].unsqueeze(dim=0))
+                        
+            
+            
+
+
+            for key in proto.keys():
+                if len(proto[key]) == 1:
+                    proto[key] = proto[key][0].squeeze()
+                elif len(proto[key]) > 1:
+                    c = proto[key][0]
+                    for i in range(1, len(proto[key])):
+                        
+                        c = torch.cat((c, proto[key][i]), dim=0)
+                    proto[key] = c
+              
                     proto[key] = torch.mean(proto[key], dim=0)
 
 
@@ -377,37 +621,54 @@ class Client_GC():
             
 
                     
-
+            
             proto_global = {}
-
+            
             for key in proto.keys():
                 proto_global[key] = server.global_prototype[server.code[key]].data
             
             for key in proto.keys():
 
+                
                 loss2 += loss_mse(proto[key], proto_global[key]) / len(proto.keys())
-
+           
             loss = loss1 + loss2 * self.args.lamb
-            loss.backward()
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+
+            
+
+            
+
+
+
+
+            loss1.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            loss2.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            
             proto = {}
+       
 
-
+        # print('1')
         for key in self.prototype.keys():
             if len(self.prototype[key]) == 1:
                 
                 self.prototype[key] = self.prototype[key][0].squeeze().data
                 
             elif len(self.prototype[key]) > 1:
+                #print(self.prototype[key])
                 c = self.prototype[key][0]
                 
                 for i in range(1, len(self.prototype[key])):
+                    #print(c)
                     
                     
                     c = torch.cat((c, self.prototype[key][i]), dim=0)
                 self.prototype[key] = c
-
+                
+            #print(self.prototype)
                 
                 self.prototype[key] = torch.mean(self.prototype[key], dim=0).data
 
@@ -415,7 +676,13 @@ class Client_GC():
 
 
 
-        print('finish')
+        print('finish!')
+
+
+
+
+
+
     def cosine_similar(self, server):
         
         similarity = torch.zeros(len(self.prototype.keys())).to(self.args.device)
@@ -433,6 +700,7 @@ class Client_GC():
                 self.rs[key] = 0.95 * self.rs[key] + 0.05 * self.simi[key]
         for key in self.rs.keys():
             self.rs[key] = torch.clamp(self.rs[key], min=1e-3)
+        
         
         return reput
 
@@ -458,14 +726,18 @@ class Client_GC():
         for i in range(len(ring)-1):
             if 'edge_attr' in g.get_edge_data(ring[i], ring[i+1]):
                 weight = g.get_edge_data(ring[i], ring[i+1])['edge_attr']
-                weight = weight.index(max(weight))
+                # weight = weight.index(max(weight))
+                weight = 1
+                
                 
             else:
                 weight = 1
             weight_list.append(weight)
         if 'edge_attr' in g.get_edge_data(ring[-1], ring[0]):
             weight = g.get_edge_data(ring[-1], ring[0])['edge_attr']
-            weight = weight.index(max(weight))
+            # weight = weight.index(max(weight))
+            weight = 1
+            
         else:
             weight = 1   
         
@@ -477,6 +749,8 @@ class Client_GC():
         self.gconvNames = server.W.keys()
         for k in server.W:
             self.W[k].data = server.W[k].data.clone()
+        self.weights_conv = {key: self.W[key] for key in self.gconvNames}
+        #print(self.weights_conv)
 
     def cache_weights(self):
         for name in self.W.keys():
@@ -491,15 +765,19 @@ class Client_GC():
 
         self.train_stats = train_stats
         self.weightsNorm = torch.norm(flatten(self.W)).item()
+        #self.gconvNames = server.W.keys()
 
-        weights_conv = {key: self.W[key] for key in self.gconvNames}
-        self.convWeightsNorm = torch.norm(flatten(weights_conv)).item()
+        #self.weights_conv = {key: self.W[key] for key in self.gconvNames}
+        
 
-        grads = {key: value.grad for key, value in self.W.items()}
-        self.gradsNorm = torch.norm(flatten(grads)).item()
 
-        grads_conv = {key: self.W[key].grad for key in self.gconvNames}
-        self.convGradsNorm = torch.norm(flatten(grads_conv)).item()
+        # self.convWeightsNorm = torch.norm(flatten(self.weights_conv)).item()
+
+        # grads = {key: value.grad for key, value in self.W.items()}
+        # self.gradsNorm = torch.norm(flatten(grads)).item()
+
+        # grads_conv = {key: self.W[key].grad for key in self.gconvNames}
+        # self.convGradsNorm = torch.norm(flatten(grads_conv)).item()
 
     def compute_weight_update(self, local_epoch):
         """ For GCFL """
@@ -577,17 +855,36 @@ def train_gc(model, dataloaders, optimizer, local_epoch, device):
 
         for _, batch in enumerate(train_loader):
             batch.to(device)
+            # print(batch)
             optimizer.zero_grad()
-            pred = model(batch)
+            pred = model(batch)[0]
+            # print(pred)
+            # print(pred.max(dim=1)[1].shape)
+
+
             label = batch.y
+            # print(pred.shape)
+            # print(label.shape)
+            
+            # print(label.shape)
+
+            # print(torch.argmax(pred, dim=1).view(-1,1).shape)
+
+
+            
+             
+
+            # acc_sum += torch.argmax(pred, dim=1).view(-1,1).eq(label).sum().item()
             acc_sum += pred.max(dim=1)[1].eq(label).sum().item()
             loss = model.loss(pred, label)
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * batch.num_graphs
             ngraphs += batch.num_graphs
+            
         total_loss /= ngraphs
         acc = acc_sum / ngraphs
+        
 
         loss_v, acc_v = eval_gc(model, val_loader, device)
         loss_tt, acc_tt = eval_gc(model, test_loader, device)
@@ -611,10 +908,11 @@ def eval_gc(model, test_loader, device):
     for batch in test_loader:
         batch.to(device)
         with torch.no_grad():
-            pred, _ = model(batch)
+            pred, _, _ = model(batch)
             label = batch.y
             loss = model.loss(pred, label)
         total_loss += loss.item() * batch.num_graphs
+        # acc_sum += torch.argmax(pred, dim=1).view(-1,1).eq(label).sum().item()
         acc_sum += pred.max(dim=1)[1].eq(label).sum().item()
         ngraphs += batch.num_graphs
 
@@ -643,7 +941,7 @@ def train_gc_prox(model, dataloaders, optimizer, local_epoch, device, gconvNames
         for _, batch in enumerate(train_loader):
             batch.to(device)
             optimizer.zero_grad()
-            pred = model(batch)
+            pred = model(batch)[0]
             label = batch.y
             acc_sum += pred.max(dim=1)[1].eq(label).sum().item()
             loss = model.loss(pred, label) + mu / 2. * _prox_term(model, gconvNames, Wt)
